@@ -1,6 +1,7 @@
 package com.qing.recordmp4
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
@@ -14,12 +15,14 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.ImageReader
 import android.media.MediaFormat
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.util.Size
 import android.view.LayoutInflater
 import android.view.Surface
 import android.view.TextureView
@@ -40,21 +43,26 @@ class MainActivity : ComponentActivity() {
     private lateinit var request: CaptureRequest
     private lateinit var mCameraCaptureSession: CameraCaptureSession
     private lateinit var surface: Surface
+    private lateinit var mediaRecorder: MediaRecorder
     private lateinit var codecHelper: MediaCodecHelper
-
+    private lateinit var mVideoSize: Size
+    private lateinit var mPreviewSize: Size
+    private var isRecording = false
     private val mImageReaderListener = ImageReader.OnImageAvailableListener {
         val image = it.acquireNextImage()
 
         image.close()
     }
-
     private lateinit var cameraHandler: Handler
-
     private lateinit var mBackgroundThread: HandlerThread
+    private val file = Environment.getExternalStorageDirectory().absolutePath + "/muxerResult.mp4"
 
     companion object {
         private val CAMERA_PERMISSION = arrayOf(
-            Manifest.permission.CAMERA
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE
         )
         private const val TAG = "MainActivity"
     }
@@ -67,12 +75,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun initData() {
-        val file = Environment.getExternalStorageDirectory().absolutePath + "muxerResult.mp4"
         codecHelper = MediaCodecHelper(
             file,
             MediaCodecHelper.AudioParameter(MediaFormat.MIMETYPE_VIDEO_AVC, 1, 40),
             MediaCodecHelper.VideoParameter(1080, 1920)
         )
+        mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(this)
+        } else {
+            MediaRecorder()
+        }
     }
 
     override fun onResume() {
@@ -97,6 +109,36 @@ class MainActivity : ComponentActivity() {
         //开启照相机
         try {
             val cameraId = mCameraManager.cameraIdList.last()
+            val characteristics = mCameraManager.getCameraCharacteristics(cameraId)
+            val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            if (map != null) {
+                //获取可用的录制视频尺寸
+                val outputSizes = map.getOutputSizes(MediaRecorder::class.java)
+                mVideoSize = outputSizes[0]
+                //获取可用的用于渲染图像的尺寸
+                val previewSizes = map.getOutputSizes(SurfaceTexture::class.java)
+                mPreviewSize = previewSizes[0]
+                //为TextureView的尺寸设置合适的宽高
+                setPreviewSize()
+                mediaRecorder.apply {
+                    // 设置录制视频源和音频源
+                    setAudioSource(MediaRecorder.AudioSource.MIC)
+                    setVideoSource(MediaRecorder.VideoSource.CAMERA)
+                    // 设置录制完成后视频的封装格式THREE_GPP为3gp.MPEG_4为mp4
+                    setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                    // 设置录制的视频编码和音频编码
+                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                    setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+                    // 设置视频录制的分辨率。必须放在设置编码和格式的后面，否则报错
+                    setVideoSize(mVideoSize.width, mVideoSize.height)
+                    // 设置录制的视频帧率。必须放在设置编码和格式的后面，否则报错
+                    setVideoEncodingBitRate(3000000)
+                    setPreviewDisplay(this@MainActivity.surface)
+                    setVideoFrameRate(30)
+                    // 设置视频文件输出的路径
+                    setOutputFile(file)
+                }
+            }
             mCameraManager.openCamera(mCameraManager.cameraIdList.last(), object :
                 CameraDevice.StateCallback() {
                 @RequiresApi(Build.VERSION_CODES.P)
@@ -163,22 +205,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setPreviewSize() {
+        //通过StreamConfigurationMap获取到的输出尺寸都是以长边为宽，短边为高的，与竖屏情况下我们认为的宽高刚好相反，所以竖屏情况下，应该讲尺寸反过来设置给TextureView，
+        // 这样预览的图像才不会变形。如果是横屏情况下就不需要反转了，但是我们这里的Activity总是竖屏的，没有考虑横屏情况。
+        val width: Int = if (Build.VERSION.SDK_INT > Build.VERSION_CODES.R) {
+            windowManager.currentWindowMetrics.bounds.width()
+        } else {
+            windowManager.defaultDisplay.width
+        }
+        val height = (width / (mPreviewSize.height.toFloat()) * mPreviewSize.height).toInt()
+        val layoutParams = binding.textureView.layoutParams
+        if (layoutParams.width == width && layoutParams.height == height) {
+            return
+        }
+        layoutParams.width = width
+        layoutParams.height = height
+        binding.textureView.layoutParams = layoutParams
+    }
+
     private fun checkCameraPermission() {
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            if (!ActivityCompat.shouldShowRequestPermissionRationale(
+        CAMERA_PERMISSION.forEach { permission ->
+            if (ActivityCompat.checkSelfPermission(
                     this,
-                    Manifest.permission.CAMERA
-                )
+                    permission
+                ) != PackageManager.PERMISSION_GRANTED
             ) {
                 ActivityCompat.requestPermissions(this, CAMERA_PERMISSION, 1)
+                return@forEach
             }
         }
     }
 
+    @SuppressLint("ResourceAsColor")
     private fun initView() {
         binding.textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(
@@ -206,10 +264,28 @@ class MainActivity : ComponentActivity() {
             }
 
         }
+
+        binding.recordButton.setOnClickListener {
+            isRecording = !isRecording
+            if (isRecording) {
+                startRecord()
+                binding.recordButton.apply {
+                    text = "停止录制"
+                    background = ContextCompat.getDrawable(this@MainActivity, R.color.red)
+                }
+            } else {
+                stopRecord()
+                binding.recordButton.apply {
+                    text = "开始录制"
+                    background = ContextCompat.getDrawable(this@MainActivity, R.color.green)
+                }
+            }
+        }
     }
 
     override fun onPause() {
         closeCamera()
+        mediaRecorder.release()
         super.onPause()
     }
 
@@ -227,6 +303,16 @@ class MainActivity : ComponentActivity() {
             join()
             finish()
         }
+    }
+
+    private fun startRecord() {
+        mediaRecorder.prepare()
+        mediaRecorder.start()
+    }
+
+    private fun stopRecord() {
+        mediaRecorder.stop()
+        mediaRecorder.reset()
     }
 
     /**
