@@ -1,3 +1,14 @@
 <resources>
     <string name="app_name">recordMP4</string>
+    <string name="request_permission">请求权限</string>
+    <string name="intro_message">
+        <![CDATA[
+
+
+            This sample demonstrates the basic use of Camera2 API. Check the source code to see how
+            you can display camera preview and take pictures.
+
+
+        ]]>
+    </string>
 </resources>
